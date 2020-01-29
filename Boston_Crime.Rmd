@@ -1,0 +1,548 @@
+---
+title: "Project"
+author: "Minjie Xu"
+date: "October 24, 2019"
+output: html_document
+---
+```{r}
+library(tidyverse)
+crime<-read.csv("C:/Users/Minjie/Documents/2018 Fall Master/Data management and data processing/Project/tmpwwunr6r7.csv",na="")
+```
+
+```{r}
+# names(crime)
+# drop useless columns OFFENSE_CODE_GROUP, REPORTING_AREA, OCCURRED_ON_DATE, UCR_PART,Location
+crime<-crime%>%
+        select(-OFFENSE_CODE_GROUP, -REPORTING_AREA, -UCR_PART, -Location)
+```
+
+```{r}
+# clean incorrect lat and long data
+crime <- crime %>% mutate(Lat = replace(Lat, as.integer(Lat)==-1, NA),
+                          Long=replace(Long, as.integer(Long)==-1, NA))
+```
+
+```{r}
+glimpse(crime)
+```
+
+```{r}
+library(naniar)
+gg_miss_upset(crime)
+
+```
+
+```{r}
+# clear OFFENSE_DESCRIPTION column
+crime$OFFENSE_DESCRIPTION<-iconv(crime$OFFENSE_DESCRIPTION,from="UTF-8",to="ASCII//TRANSLIT")
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'M/V', 'MOTOR/VEHICLE')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'D/W', 'DANGEROUS WEAPON')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'VAL', 'VALIDATION')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'VIOL.-', 'VIOLATION-')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'VIOL. OF', 'VIOLATION OF')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'B&E', 'BREAKING AND ENTERING')
+crime$OFFENSE_DESCRIPTION<-str_replace(crime$OFFENSE_DESCRIPTION, 'A&B', 'ASSAULT AND BATTERY')
+
+code_name<-crime%>%
+        filter(!is.na(OFFENSE_DESCRIPTION))%>%
+        group_by(OFFENSE_CODE)%>%
+        summarise(OFFENSE_DESCRIPTION2=names(which.max(table(OFFENSE_DESCRIPTION))))
+
+crime<-crime%>%
+        left_join(code_name,by="OFFENSE_CODE")%>%
+        select(-OFFENSE_DESCRIPTION)
+```
+
+```{r}
+# Word cloud for offense description
+library(tidytext)
+library(wordcloud)
+
+tidy_desc<-crime%>%
+        unnest_tokens(word, OFFENSE_DESCRIPTION2)%>%
+        count(word, sort=TRUE)%>%
+        filter(!word %in% stop_words$word)
+
+wordcloud(words = tidy_desc$word, freq = tidy_desc$n, min.freq = 1,
+          max.words=100, random.order=FALSE, rot.per=0.15, 
+          colors=brewer.pal(8, "Dark2"),scale=c(3,0.2)) 
+```
+
+```{r}
+# bigram analysis for offense description
+library(igraph)
+library(ggraph)
+crime_graph<-crime%>%
+        unnest_tokens(bigram, OFFENSE_DESCRIPTION2, token = "ngrams", n = 2)%>%
+        select(bigram)%>%
+        separate(bigram, c("word1", "word2"), sep = " ")%>%
+        filter(!word1 %in% stop_words$word,!is.na(word1)) %>%
+        filter(!word2 %in% stop_words$word,!is.na(word2))%>%
+        count(word1, word2, sort=TRUE) %>%
+        filter(n > 1500) %>%
+        graph_from_data_frame()
+
+ggraph(crime_graph,layout="igraph",algorithm="kk") +
+        geom_edge_link() +
+        geom_node_point() +
+        geom_node_text(aes(label = name), vjust = 1, hjust = 1)
+
+ggsave("bigram.jpeg", width=10, height=7)
+```
+
+```{r}
+# Bin firstly OFFENSE_DESCRIPTION2 based on names.
+# Then we will only keep the most frequent categories and bin less frequent (<5%*440606~20000) ones into "Other"
+crime<-crime%>%
+        mutate(OFFENSE_DESCRIPTION2=str_replace(OFFENSE_DESCRIPTION2,"\\ - ", "-"),
+               OFFENSE_DESCRIPTION2=str_replace(OFFENSE_DESCRIPTION2,"\\-.*", ""),
+               OFFENSE_DESCRIPTION2=str_replace(OFFENSE_DESCRIPTION2,"\\(.*", ""),
+               OFFENSE_DESCRIPTION2=str_trim(OFFENSE_DESCRIPTION2),
+               sub_name=str_sub(OFFENSE_DESCRIPTION2, start = 1L, end = 4L))
+
+crime_name_abb<-crime%>%
+        group_by(sub_name)%>%
+        summarise(OFFENSE_DESCRIPTION3=names(which.max(table(OFFENSE_DESCRIPTION2))),count=n())%>%
+        arrange(desc(count))%>%
+        mutate(OFFENSE_bin=ifelse(count>20000,OFFENSE_DESCRIPTION3,"OTHER"),
+               OFFENSE_CATEGORY=str_sub(OFFENSE_bin, start = 1L, end = 1L))
+
+crime_name_abb2<-crime_name_abb%>%
+        group_by(OFFENSE_bin,OFFENSE_CATEGORY)%>%
+        summarise(n=sum(count))
+
+ggplot(crime_name_abb2,aes(x=reorder(OFFENSE_bin,n),y=n))+
+        geom_col(fill="darkred")+
+        geom_label(aes(label = n), color = "black", hjust = 1) +
+        coord_flip()+
+        labs(x = "Offense Description", y='Number of crime incidents')
+ggsave("crime_type_bar_plot.jpeg", width=10, height=5)
+```
+
+```{r}
+# simplify OFFENSE_DESCRIPTION for the original crime data frame
+crime<-crime%>%
+        left_join(crime_name_abb,by="sub_name")%>%
+        select(-OFFENSE_DESCRIPTION2,-OFFENSE_DESCRIPTION3,-sub_name,-count,-OFFENSE_bin)
+```
+
+```{r}
+# visualization for DISTRICT
+dist_table<-tibble(DISTRICT=c("A1","A15","A7","B2","B3","C11","C6","D14","D4","E13","E18","E5","External"),
+                   DIST_NAME=c("Downtown","Charlestown","East Boston","Roxbury","Mattapan",
+                          "Dorchester","South Boston","Brighton","South End","Jamaica Plain",
+                          "Hyde Park","West Roxbury","External"))
+crime%>%
+        filter(!is.na(DISTRICT))%>%
+        left_join(dist_table,by="DISTRICT")%>%
+        count(DIST_NAME,sort=TRUE)%>%
+        ggplot(aes(x=reorder(DIST_NAME,n),y=n))+
+        geom_col(fill="darkred")+
+        geom_label(aes(label = n), color = "black", hjust = 1) +
+        coord_flip()+
+        labs(x = "District Name", y='Number of crime incidents')
+ggsave("crime_district_bar_plot.jpeg", width=10, height=5)
+## Should bin West Roxbury, East Boston, Charlestown, External into Other, do it later
+```
+
+```{r}
+# Word cloud for street
+street<-as.data.frame(table(crime$STREET))
+colnames(street) <- c("Street_Name", "Count")
+street<-street[street$Street_Name!="",]
+
+wordcloud(street$Street_Name, street$Count, min.freq = 50,
+          max.words=150, random.order=FALSE, rot.per=0.15, 
+          colors=brewer.pal(8, "Dark2"),scale=c(1.5,.3))
+```
+
+```{r}
+# Visualization based on Long and Lat data
+library(leaflet) # interactive mapping 
+library(leaflet.extras) #extra mapping for leaflet
+crime_location<-crime %>%
+        filter(!is.na(Long),!is.na(Lat))%>%
+        select(Long,Lat)
+
+crime_location %>%
+        leaflet() %>%
+        setView(lng = -71.0705, lat = 42.33306, zoom = 11) %>% 
+        addTiles( ) %>%
+        addHeatmap(lng =crime_location$Long, lat =crime_location$Lat, max = 2, radius = 12)
+```
+
+```{r}
+# hot spots for crime location top 50
+crime_location2<-crime_location %>%
+        count(Long,Lat,sort=TRUE)%>%
+        top_n(50)
+
+crime_location2 %>%
+        leaflet() %>%
+        setView(lng = -71.0745, lat = 42.3275, zoom = 12) %>% 
+        addTiles( ) %>%
+        addHeatmap(lng =crime_location2$Long, lat =crime_location2$Lat, max = 2, radius = 12)
+```
+
+```{r}
+# Visualization Long and Lat data hot spots based on offense category
+crime %>%
+        filter(!is.na(Long),!is.na(Lat),!is.na(OFFENSE_CATEGORY))%>%
+        left_join(crime_name_abb2,by="OFFENSE_CATEGORY")%>%
+        count(OFFENSE_bin,Long,Lat,sort=TRUE)%>%
+        top_n(10000)%>%
+        ggplot()+
+        geom_point(aes(x=Long,y=Lat),alpha=0.1,color="red")+
+        facet_wrap(~ OFFENSE_bin)+ 
+        labs(title="Crime hotspots of each crime category")
+ggsave("Crime_hotspots_each_crime_category.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualization for date-time features
+crime<-crime%>%
+        mutate(Date=str_sub(OCCURRED_ON_DATE, start = 1L, end = 10L))
+# Daily crime incidents line
+crime%>%
+        count(Date,sort=TRUE)%>%
+        ggplot(aes(x = Date, y = n, group=1))+
+        geom_line(color="#E7B800", size = 1)+
+        theme_minimal()+
+        labs(x = "Date", y='Number of crime incidents in that day',title='Daily crime incidents line plot') 
+```
+
+```{r}
+# clean shooting column
+crime<-crime%>%mutate(SHOOTING =as.character(SHOOTING),
+                      SHOOTING=str_replace(SHOOTING, 'Y', '1'))
+
+crime%>%
+        count(Date,SHOOTING)%>%
+        ggplot( )+
+        geom_line(aes(x=Date,y=n,group=SHOOTING,color=SHOOTING),size=1)+
+        theme_minimal()+
+        labs(x = "Date", y="Incidents count",title='Daily crime incidents line plot') 
+```
+
+```{r}
+# clean shooting column
+# fill na with 0
+crime<-crime%>%mutate(SHOOTING =replace_na(SHOOTING,"0"))
+
+crime%>%
+        count(Date,SHOOTING)%>%
+        ggplot( )+
+        geom_line(aes(x=Date,y=n,group=SHOOTING,color=SHOOTING),size=1)+
+        theme_minimal()+
+        labs(x = "Date", y="Incidents count",title='Daily crime incidents line plot')
+ggsave("Daily_crime_incidents_line_plot.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualize yealy shooting & crime pattern
+crime_year<-crime%>%
+        count(YEAR)
+
+crime%>%
+        filter(SHOOTING=="1")%>%
+        count(YEAR)%>%
+        left_join(crime_year,by="YEAR")%>%
+        mutate(SHOOTING=n.x,CRIME=n.y)%>%
+        gather(key="INCIDENT",value="n",SHOOTING,CRIME)%>%
+        ggplot(aes(x=YEAR,y=n))+
+        geom_line(aes(color = INCIDENT),size=1.5) +
+        geom_text(aes(label = n),vjust=-0.3, color="black", size=3.5)+
+        labs(title = "Yearly pattern of crime and shooting", x = "Year", y = "Incidents count")+
+        theme_bw()
+ggsave("Yearly pattern of crime and shooting.jpeg", width=10, height=5)
+```
+
+```{r}
+crime%>%
+        count(YEAR,SHOOTING)%>%
+        left_join(crime_year,by="YEAR")%>%
+        mutate(proportion=n.x/n.y)%>%
+        ggplot(aes(x=YEAR,y=proportion,fill=SHOOTING,label = paste0(round(proportion*100,1),"%")))+
+        geom_col( )+
+        geom_text(position = position_stack(vjust = 0.5),color="black", size=3.5)+
+        coord_flip()+
+        labs(x = "Year", y='SHOOTING Proportion')
+ggsave("Yearly pattern of crime and shooting proportion.jpeg", width=10, height=5)
+```
+
+```{r}
+# yearly stacked barchart
+crime%>%
+        filter(!is.na(YEAR),!is.na(DISTRICT),!is.na(OFFENSE_CATEGORY))%>%
+        count(YEAR,DISTRICT,OFFENSE_CATEGORY)%>%
+        left_join(dist_table,by="DISTRICT")%>%
+        left_join(crime_name_abb2,by="OFFENSE_CATEGORY")%>%
+        ggplot( ) + 
+        geom_col(aes(x=YEAR,y=n.x,fill=OFFENSE_bin),position="stack")+
+        facet_wrap(~ DIST_NAME)+ 
+        theme(legend.title = element_blank(),axis.text.x = element_text(angle = 45, hjust = 1))+
+        labs(x = "Year", y="Incidents count",title="Yearly crime incidents bar chart in each district")
+ggsave("Yearly crime incidents bar chart in each district.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualize monthly pattern for crime
+crime%>%
+        count(MONTH,DAY_OF_WEEK)%>%
+        ggplot( )+
+        geom_line(aes(x=as.factor(MONTH),y=n,
+                      group=DAY_OF_WEEK,color=DAY_OF_WEEK),size=1.5)+
+        theme_minimal()+ 
+        labs(x = "Month", y="Incidents count",title='Weekday crime incidents versus month line plot')
+ggsave("Weekday crime incidents versus month line plot.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualize monthly pattern for SHOOTING
+crime%>%
+        filter(SHOOTING=="1")%>%
+        count(MONTH,DAY_OF_WEEK)%>%
+        ggplot( )+
+        geom_line(aes(x=factor(DAY_OF_WEEK,weekdays(min(as.Date(crime$Date))+0:6)),y=n,
+                      group=as.factor(MONTH),color=as.factor(MONTH)),size=1.5)+
+        guides(color=guide_legend(title="Month"))+
+        theme_minimal()+ 
+        labs(x = "Day of week", y="Incidents count",title='Monthly shooting incidents versus weekday line plot')
+ggsave("Monthly shooting incidents versus weekday line plot.jpeg", width=10, height=5)
+```
+
+```{r}
+# heatmap to show month and hour crime relationship.
+crime %>%
+        count(MONTH,HOUR)%>%
+        ggplot()+
+        geom_tile(aes(x = as.factor(MONTH),y=as.factor(HOUR), fill=n), na.rm=TRUE)+ 
+        labs(x = "Month", y='Hour',title='Crime heatmap of Hour versus Month')
+ggsave("Crime heatmap of hour versus Month.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualization of Shooting as a function of month
+crime%>%
+        count(MONTH,SHOOTING)%>%
+        ggplot()+
+        geom_line(aes(x=as.factor(MONTH),y=n,group=SHOOTING,color=SHOOTING),size=1.5)+
+        geom_text(aes(x=as.factor(MONTH),y=n,label = n),vjust=-0.3, color="black", size=3.5)+
+        labs(x = "Month", y="Number of crime incidents")+
+        theme_bw()
+ggsave("Monthly pattern of if shooting crime.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualize weekly pattern for crime
+crime %>% 
+        count(DAY_OF_WEEK,sort=TRUE)%>%
+        ggplot(aes(x = reorder(DAY_OF_WEEK,n), y = n)) +
+        geom_col(fill = "darkred") +
+        geom_label(aes(label = n), color = "black", hjust = 1) +
+        coord_flip() +
+        labs(title = "Weekday pattern of crime", x = "Day of week", y = "Incidents count")+
+        theme_bw()
+ggsave("Weekday pattern of crime.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualization of Shooting as a function of weekday
+crime%>%
+        count(DAY_OF_WEEK,SHOOTING)%>%
+        ggplot(aes(x=factor(DAY_OF_WEEK,weekdays(min(as.Date(crime$Date))+0:6)),y=n))+
+        geom_line(aes(color=SHOOTING,group=SHOOTING),size=1.5)+
+        geom_text(aes(label = n),vjust=-0.3, color="black", size=3.5)+
+        labs(x = "Day of week", y="Number of crime incidents")+
+        theme_bw()
+ggsave("Weekday pattern of if shooting crime.jpeg", width=10, height=5)
+```
+
+```{r}
+# crime incidents as a function of Hours in a week
+library(grid)
+library(gridExtra)
+Sun <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Sunday")
+
+Mon <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Monday")
+
+Tue <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Tuesday")
+
+Wed <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Wednesday")
+
+Thu <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Thursday")
+
+Fri <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Friday")
+
+Sat <- crime %>%
+  count(HOUR, DAY_OF_WEEK) %>%
+  filter(DAY_OF_WEEK=="Saturday")
+
+m1 <- Sun %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="red") +
+  geom_point(color="red") +
+  labs(title = "Sunday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m2 <- Mon %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="blue") +
+  geom_point(color="blue") +
+  labs(title = "Monday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m3 <- Tue %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="blue") +
+  geom_point(color="blue") +
+  labs(title = "Tuesday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m4 <- Wed %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="blue") +
+  geom_point(color="blue") +
+  labs(title = "Wednesday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m5 <- Thu %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="blue") +
+  geom_point(color="blue") +
+  labs(title = "Thursday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m6 <- Fri %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="blue") +
+  geom_point(color="blue") +
+  labs(title = "Friday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+m7 <- Sat %>% ggplot(aes(x = HOUR, y = n)) +
+  geom_line(lty = 2,color="red") +
+  geom_point(color="red") +
+  labs(title = "Saturday", x = "Hour",  y = "Incidents count") +
+  theme_bw()
+
+grid.arrange(m7,m1,m2,m3,m4,m5,m6, top = textGrob("Total number of crime incidents in Hour for One Week", gp = gpar(fontsize = 15,font = 3)))
+```
+
+```{r}
+# Visualization of Shooting as a function of hour
+crime%>%
+        count(HOUR,SHOOTING)%>%
+        ggplot()+
+        geom_line(aes(x=as.factor(HOUR),y=n,color=SHOOTING,group=SHOOTING),size=1.5)+
+        geom_text(aes(x=as.factor(HOUR),y=n,label = n),vjust=-0.3, color="black", size=3.5)+
+        labs(x = "Hour of a day", y="Number of crime incidents")+
+        theme_bw()
+ggsave("Hourly pattern of if shooting crime.jpeg", width=10, height=5)
+```
+
+```{r}
+# mosaic plot to show offense type and shooting relationship.
+library(ggmosaic)
+crime %>%
+        left_join(crime_name_abb2,by="OFFENSE_CATEGORY")%>%
+        ggplot()+
+        geom_mosaic(aes(x = product(SHOOTING,OFFENSE_bin), fill=SHOOTING), na.rm=TRUE) +
+        coord_flip() +
+        labs(x ="OFFENSE DESCRIPTION" , y="IF SHOOTING",title='Mosaic plot for crime type vs shooting relationship')
+ggsave("Mosaic plot for crime type vs shooting relationship.jpeg", width=10, height=5)
+```
+
+```{r}
+# Visualization of Shooting as a function of district
+crime%>%
+        filter(!is.na(DISTRICT))%>%
+        count(DISTRICT,SHOOTING)%>%
+        left_join(dist_table,by="DISTRICT")%>%
+        ggplot()+
+        geom_line(aes(x=DIST_NAME,y=n,color=SHOOTING,group=SHOOTING),size=1.5)+
+        geom_text(aes(x=DIST_NAME,y=n,label = n),vjust=-0.3, color="black", size=3.5)+
+        labs(x = "District", y="Number of crime incidents")+
+        theme(axis.text.x = element_text(angle = 90, hjust = 1))
+ggsave("District distribution of if shooting crime.jpeg", width=10, height=5)
+```
+
+```{r}
+## bin West Roxbury, East Boston, Charlestown, External into Other
+crime_district<-crime%>%
+        filter(!is.na(DISTRICT))%>%
+        left_join(dist_table,by="DISTRICT")%>%
+        count(DISTRICT,DIST_NAME,sort=TRUE)%>%
+        mutate(DISTRICT2=ifelse(n>20000,DIST_NAME,"Other"))
+
+## bin 21,22,23,1,2,3,4,5,6,7,8 into 0 for the column HOUR
+crime<-crime%>%
+        mutate(HOUR=ifelse(HOUR %in% c(21,22,23,1,2,3,4,5,6,7,8),1,HOUR))
+
+# Preparation for models
+crime<-crime%>%
+        left_join(crime_district,by="DISTRICT")%>%
+        select(DISTRICT2,OFFENSE_CATEGORY,MONTH,DAY_OF_WEEK,HOUR)%>%
+        filter(!is.na(DISTRICT2),!is.na(OFFENSE_CATEGORY),!is.na(MONTH),!is.na(DAY_OF_WEEK),
+               !is.na(HOUR))
+```
+
+```{r}
+# creating dummy variables
+crime_y<-crime[,"OFFENSE_CATEGORY"]
+crime_x<-crime[,-2]
+crime_x<-mutate_all(crime_x,as.character)
+
+library(caret)
+dummies_model <- dummyVars(" ~ .", data=crime_x,fullRank=TRUE)
+crime_x <- data.frame(predict(dummies_model, newdata = crime_x))
+crime<-cbind(crime_x,as.character(crime_y))
+names(crime)[length(crime)]<-"OFFENSE_CATEGORY"
+
+write.csv(crime,"C:/Users/Minjie/Documents/2018 Fall Master/Data management and data processing/Project/clean_crime.csv", row.names = FALSE)
+```
+
+```{r}
+# split data set 85% training,15% test
+class_list<-as.data.frame(table(crime$OFFENSE_CATEGORY))
+train_idex<-c()
+for (i in 1:nrow(class_list)){
+        set.seed(i)
+        tr_idx<-sample(rownames(subset(crime,OFFENSE_CATEGORY==class_list$Var1[i])),size=round(class_list$Freq[i]*0.85))
+        train_idex<-c(train_idex,tr_idx)
+}
+
+training_data<-crime%>%
+        filter(rownames(crime) %in% train_idex)
+test_data<-crime%>%
+        filter(!rownames(crime) %in% train_idex)
+# unbalanced dataset for multiple class classification
+table(training_data$OFFENSE_CATEGORY)
+```
+
+```{r}
+# handling unbalanced data by using smote resampling method
+ctrl <- trainControl(method = "cv", number = 10,verboseIter = FALSE,
+                     summaryFunction = multiClassSummary, sampling = "down")
+metric <- "Accuracy"
+
+# random forest
+set.seed(20)
+model_rf_down <- caret::train(OFFENSE_CATEGORY ~ .,
+                              data = training_data,
+                              method = "rf",
+                              metric=metric,
+                              trControl = ctrl)
+
+```
+
+```{r}
+confusionMatrix(predict(model_rf_down, test_data), as.factor(test_data$OFFENSE_CATEGORY))
+```
+
